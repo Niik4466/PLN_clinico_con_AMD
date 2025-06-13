@@ -1,0 +1,6 @@
+[submodule "paper_1/NVIDIA/Breast-Cancer-Classification"]
+	path = paper_1/NVIDIA/Breast-Cancer-Classification
+	url = https://github.com/saniaesk/Breast-Cancer-Classification.git
+[submodule "paper_1/AMD/Breast-Cancer-Classification"]
+	path = paper_1/AMD/Breast-Cancer-Classification
+	url = https://github.com/saniaesk/Breast-Cancer-Classification.git
