@@ -81,7 +81,7 @@ class GpuMonitor():
             with open(filename, mode='w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow(["Time (s)", "VRAM Usage (Bytes)", "Power (W)", "Utilization (%)"])
-                for i in range(len(self.vram_usage(idx))):
+                for i in range(len(self.vram_usage[idx])):
                                writer.writerow([
                                    i * self.interval,
                                    self.vram_usage[idx][i],
