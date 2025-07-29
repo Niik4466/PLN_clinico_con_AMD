@@ -7,3 +7,5 @@ timm
 Pillow
 tqdm
 kagglehub
+
+pynvml
