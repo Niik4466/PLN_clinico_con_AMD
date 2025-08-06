@@ -11,7 +11,7 @@ import argparse
 import subprocess
 
 class GpuMonitor():
-    def __init__(self, interval=0.1, min_power_mw=0, max_cards=8):
+    def __init__(self, interval=0.1, min_w_usage=0, max_cards=8):
         """
         Monitor de GPUs AMD leyendo métricas de /sys/class/drm/cardX/device/
 
@@ -21,7 +21,7 @@ class GpuMonitor():
             max_cards (int): máximo número de GPUs (cards) a monitorear.
         """
         self.interval = interval
-        self.min_power_mw = min_power_mw
+        self.min_w_usage = min_w_usage
         # Detectar cards físicamente existentes
         self.cards = [f"card{i}" for i in range(max_cards) if os.path.exists(f"/sys/class/drm/card{i}/device")]
         self.vram_usage = [[] for _ in self.cards]
@@ -79,7 +79,7 @@ class GpuMonitor():
                 # Activar grabación si alguna GPU pasa el umbral de potencia
                 for card in self.cards:
                     power, _ = self._read_int(f"/sys/class/drm/{card}/device/power1_average")
-                    if power and power > self.min_power_mw:
+                    if power and power > self.min_w_usage:
                         start_recording = True
                         break
             time.sleep(self.interval)
