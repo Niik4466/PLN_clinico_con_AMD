@@ -1,156 +1,300 @@
-# Ejecutar cada uno de los archivos .py almacenados en un directorio dado por argumento
-# Para cada uno del nombre de los archivos (excluido el .py) obtener metricas de rendimiento y guardarlas en
-# el directorio Data en formato .csv (si los archivos ya existen entonces borrarlos)
-# finalmente ejecutar un script para graficar los datos almacenados en Data y almacenarlos en Results
+"""
+Monitor de GPU + ejecutor de scripts .py
+Guarda métricas por GPU en Data/ y resultados de gráficas en Results/ (la parte de graficar puede ser otro script).
+"""
 
 import os
 import threading
 import time
-import csv
 import argparse
+import torch
 import subprocess
+import logging
+import csv
+import sys
+import signal
+from statistics import mean
+from typing import List, Optional
+import torch
+from fvcore.nn import FlopCountAnalysis
 
-class GpuMonitor():
-    def __init__(self, interval=0.1, min_w_usage=0, max_cards=8):
+# Importamos amdsmi; si no esta, se deshabilita el monitor
+AMDSMI_AVAIBLE = False
+try:
+    import amdsmi
+    from amdsmi import (
+        amdsmi_init,
+        amdsmi_shut_down,
+        amdsmi_get_processor_handles,
+        amdsmi_get_gpu_vram_usage,
+        amdsmi_get_power_info,
+        amdsmi_get_gpu_activity,
+        AmdSmiUtilizationCounterType,
+        AmdSmiException,
+    )
+    AMDSMI_AVAIBLE = True
+except Exception:
+    AMDSMI_AVAIBLE = False
+
+
+class GpuMonitor:
+    def __init__(self, interval: float = 0.1, min_w_usage: int = 0):
         """
-        Monitor de GPUs AMD leyendo métricas de /sys/class/drm/cardX/device/
-
-        Args:
-            interval (float): intervalo de lectura en segundos.
-            min_power_mw (int): umbral mínimo de consumo (mW) para comenzar a registrar.
-            max_cards (int): máximo número de GPUs (cards) a monitorear.
+        interval: segundos entre mediciones
+        min_w_usage: umbral en mW para comenzar a registrar
         """
         self.interval = interval
         self.min_w_usage = min_w_usage
-        # Detectar cards físicamente existentes
-        self.cards = [f"card{i}" for i in range(max_cards) if os.path.exists(f"/sys/class/drm/card{i}/device")]
-        self.vram_usage = [[] for _ in self.cards]
-        self.power = [[] for _ in self.cards]
-        self.util = [[] for _ in self.cards]
         self.running = False
         self.thread = None
 
-    def _read_int(self, path):
+        if not AMDSMI_AVAIBLE:
+            print("Aviso: amdsmi no está disponible. No se monitorizará GPU.")
+            self.gpus = []
+            return
+
         try:
-            with open(path, "r") as f:
-                return int(f.read().strip()), None
-        except FileNotFoundError:
-            return None, f"No existe {path}"
-        except PermissionError:
-            return None, f"Permiso denegado {path}"
+            amdsmi_init()
+            self.devices = amdsmi_get_processor_handles()
         except Exception as e:
-            return None, f"Error leyendo {path}: {e}"
+            print("Error inicializando amdsmi:", e)
+            self.gpus = []
 
-    def _read_metrics_for_card(self, card):
-        base_path = f"/sys/class/drm/{card}/device"
-        gpu_busy_path = f"{base_path}/gpu_busy_percent"
-        vram_used_path = f"{base_path}/mem_info_vram_used"
-        power_path = f"{base_path}/hwmon/hwmon4/power1_average"
-
-        gpu_busy, err_busy = self._read_int(gpu_busy_path)
-        vram_used, err_vram = self._read_int(vram_used_path)
-        power, err_power = self._read_int(power_path)
-
-        return gpu_busy, err_busy, vram_used, err_vram, power, err_power
+        # almacenar series por GPU
+        self.vram_usage: List[List[float]] = [[] for _ in range(len(self.gpus))]
+        self.power: List[List[float]] = [[] for _ in range(len(self.gpus))]
+        self.util_gfx: List[List[float]] = [[] for _ in range(len(self.gpus))]
+        self.util_umc: List[List[float]] = [[] for _ in range(len(self.gpus))]
+        self.util_mm: List[List[float]] = [[] for _ in range(len(self.gpus))]
 
     def start(self):
         if self.running:
-            print("Monitoreo ya iniciado")
             return
         self.running = True
-        self.thread = threading.Thread(target=self._monitor)
+        self.thread = threading.Thread(target=self._monitor, daemon=True)
         self.thread.start()
 
     def stop(self):
         self.running = False
         if self.thread:
-            self.thread.join()
+            self.thread.join(timeout=5.0)
+        if AMDSMI_AVAIBLE:
+            try:
+                amdsmi_shut_down()
+            except Exception:
+                pass
 
     def _monitor(self):
-        start_recording = False
+        start = False
         while self.running:
-            if start_recording:
-                for idx, card in enumerate(self.cards):
-                    gpu_busy, _, vram_used, _, power, _ = self._read_metrics_for_card(card)
-                    self.util[idx].append(gpu_busy)
-                    self.vram_usage[idx].append(vram_used / 1024 ** 2)  # Convertir a MB
-                    self.power[idx].append(power / 1_000_000)  # Convertir a W
-            else:
-                # Activar grabación si alguna GPU pasa el umbral de potencia
-                for card in self.cards:
-                    power, _ = self._read_int(f"/sys/class/drm/{card}/device/power1_average")
-                    if power and power > self.min_w_usage:
-                        start_recording = True
-                        break
+            if not self.gpus:
+                time.sleep(self.interval)
+                continue
+            try:
+                if not start:
+                    # nvmlDeviceGetPowerUsage devuelve mW
+                    start = any(nvmlDeviceGetPowerUsage(g) > self.min_w_usage for g in self.gpus)
+                else:
+                    for idx, g in enumerate(self.gpus):
+                        mem = amdsmi_get_gpu_vram_usage["vram_used"]
+                        pwr = amdsmi_get_power_info(g)["socket_power"]
+                        util = amdsmi_get_gpu_activity(g)
+                        self.vram_usage[idx].append(float(mem))
+                        self.power[idx].append(float(pwr))
+                        self.util_gfx[idx].append(float(util['gfx_activity']))
+                        self.util_umc[idx].append(float(util['umc_activity']))
+                        self.util_mm[idx].append(float(util['mm_activity']))
+
+            except Exception as e:
+                # no abortar el hilo por un error momentáneo
+                print("Warning: error leyendo NVML:", e)
             time.sleep(self.interval)
+
+    def clear(self):
+        self.vram_usage = [[] for _ in range(len(self.gpus))]
+        self.power = [[] for _ in range(len(self.gpus))]
+        self.util_gfx = [[] for _ in range(len(self.gpus))]
+        self.util_umc = [[] for _ in range(len(self.gpus))]
+        self.util_mm = [[] for _ in range(len(self.gpus))]
 
     def get_stats(self):
         stats = {}
-        for idx in range(len(self.cards)):
-            stats[f"gpu_{idx}_vram_usage_avg"] = (sum(self.vram_usage[idx]) / len(self.vram_usage[idx])
-                                                  if self.vram_usage[idx] else None)
-            stats[f"gpu_{idx}_power_avg"] = (sum(self.power[idx]) / len(self.power[idx])
-                                             if self.power[idx] else None)
-            stats[f"gpu_{idx}_util_avg"] = (sum(self.util[idx]) / len(self.util[idx])
-                                            if self.util[idx] else None)
+        for i in range(len(self.gpus)):
+            stats[f"gpu_{i}_vram_avg_bytes"] = mean(self.vram_usage[i]) if self.vram_usage[i] else None
+            stats[f"gpu_{i}_power_avg_w"] = mean(self.power[i]) if self.power[i] else None
+            stats[f"gpu_{i}_util_avg_pct_gfx"] = mean(self.util_gfx[i]) if self.util_gfx[i] else None
+            stats[f"gpu_{i}_util_avg_pct_umc"] = mean(self.util_umc[i]) if self.util_umc[i] else None
+            stats[f"gpu_{i}_util_avg_pct_mm"] = mean(self.util_mm[i]) if self.util_mm[i] else None
+            stats[f"gpu_{i}_samples"] = len(self.vram_usage[i])
         return stats
 
-    def export_to_csv(self, filename_prefix="gpu_stats", output_path="Data"):
+    def export_to_csv(self, filename_prefix="gpu_stats", output_path="Data", units="MiB"):
+        """
+        units: "MiB" or "bytes"
+        """
         os.makedirs(output_path, exist_ok=True)
-        for idx, card in enumerate(self.cards):
-            filename = f"{output_path}/{filename_prefix}_{card}.csv"
+        for idx in range(len(self.gpus)):
+            filename = os.path.join(output_path, f"{filename_prefix}_gpu{idx}.csv")
             with open(filename, mode='w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(["Time (s)", "VRAM Usage (Bytes)", "Power (mW)", "Utilization (%)"])
+                unit_label = "VRAM (MiB)" if units == "MiB" else "VRAM (Bytes)"
+                writer.writerow(["time_s", unit_label, "Power_W", "Util_pct_gfx", "Util_pct_umc", "Util_pct_mm"])
                 for i in range(len(self.vram_usage[idx])):
+                    vram_val = self.vram_usage[idx][i]
+                    if units == "MiB":
+                        vram_val = vram_val / (1024.0 * 1024.0)
                     writer.writerow([
-                        i * self.interval,
-                        self.vram_usage[idx][i] if self.vram_usage[idx][i] is not None else "",
-                        self.power[idx][i] if self.power[idx][i] is not None else "",
-                        self.util[idx][i] if self.util[idx][i] is not None else ""
+                        round(i * self.interval, 6),
+                        vram_val,
+                        self.power[idx][i] if i < len(self.power[idx]) else None,
+                        self.util_gfx[idx][i] if i < len(self.util_gfx[idx]) else None,
+                        self.util_umc[idx][i] if i < len(self.util_umc[idx]) else None,
+                        self.util_mm[idx][i] if i < len(self.util_mm[idx]) else None
                     ])
+
+    def export_epoch_resume(self, filename_prefix="epoch_resume", output_path="Data", epoch: int = 0):
+        """
+        Guarda/concatena resumen por época. Columnas: Epoch, Time_s, mean VRAM (MiB) GPU0.., mean Power GPU0.., mean Util GPU0..
+        """
+        os.makedirs(output_path, exist_ok=True)
+        filename = os.path.join(output_path, f"{filename_prefix}.csv")
+        file_exists = os.path.isfile(filename)
+
+        # construir row con medidas (usar MiB para legibilidad)
+        time_s = (len(self.vram_usage[0]) * self.interval) if self.vram_usage and self.vram_usage[0] else 0.0
+        mean_vram = [(mean(l) / (1024.0 * 1024.0)) if l else None for l in self.vram_usage]
+        mean_power = [mean(l) if l else None for l in self.power]
+        mean_util_gfx = [mean(l) if l else None for l in self.util_gfx]
+        mean_util_umc = [mean(l) if l else None for l in self.util_umc]
+        mean_util_mm = [mean(l) if l else None for l in self.util_mm]
+
+        with open(filename, mode='a', newline='') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                header = ["Epoch", "Time_s"] + \
+                    [f"Mean_VRAM_MiB_GPU{i}" for i in range(len(self.gpus))] + \
+                    [f"Mean_Power_W_GPU{i}" for i in range(len(self.gpus))] + \
+                    [f"Mean_Util_pct_GPU{i}" for i in range(len(self.gpus))] + \
+                    [f"Mean_Util_pct_gfx_GPU{i}" for i in range(len(self.gpus))] + \
+                    [f"Mean_Util_pct_umc_GPU{i}" for i in range(len(self.gpus))] + \
+                    [f"Mean_Util_pct_mm_GPU{i}" for i in range(len(self.gpus))]
+                writer.writerow(header)
+
+            row = [epoch, round(time_s, 6)] + \
+                [round(v, 6) if v is not None else "" for v in mean_vram] + \
+                [round(p, 6) if p is not None else "" for p in mean_power] + \
+                [round(u, 6) if u is not None else "" for u in mean_util_gfx] + \
+                [round(u, 6) if u is not None else "" for u in mean_util_umc] + \
+                [round(u, 6) if u is not None else "" for u in mean_util_mm]
+
+            writer.writerow(row)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Monitor de GPU utilizando NVML")
-    parser.add_argument('--interval', type=float, default=0.1, help='Intervalo entre mediciones en segundos')
-    parser.add_argument('--min_w_usage', type=int, default=0, help='Umbral mínimo de uso de energía en mW')
-    parser.add_argument('--exec_dir', type=str, default='.', help='Directorio a utilizar para la medición')
-    parser.add_argument('--output_dir', type=str, default='.', help='Directorio a utilizar para almacenar el output')
-    return parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument('--interval', type=float, default=0.1)
+    p.add_argument('--min_w_usage', type=int, default=0)
+    p.add_argument('--exec_dir', type=str, default='.')
+    p.add_argument('--output_dir', type=str, default='Data')
+    p.add_argument('--timeout', type=float, default=None, help="Timeout (s) para cada script ejecutado")
+    return p.parse_args()
 
-def execute_and_monitor(exec_path, output_path="Data", interval=0.1, min_w_usage=0):
-    exec_name = os.path.basename(exec_path)
-    print(f"\n Ejecutando {exec_name}...")
-    
+
+def execute_and_monitor(exec_path, output_path="Data", interval=0.1, min_w_usage=0, timeout=None):
+    exec_name = os.path.splitext(os.path.basename(exec_path))[0]
+    print(f"\n== Ejecutando {exec_name} ({exec_path}) ==")
+
+    # borrar CSVs previos del mismo prefijo (si quieres ese comportamiento)
+    for fname in os.listdir(output_path) if os.path.isdir(output_path) else []:
+        if fname.startswith(exec_name):
+            try:
+                os.remove(os.path.join(output_path, fname))
+            except Exception:
+                pass
+
     monitor = GpuMonitor(interval=interval, min_w_usage=min_w_usage)
     monitor.start()
 
-    # Ejecutar el programa
     try:
-        result = subprocess.run(["python", exec_path])
+        # usa el mismo intérprete de Python que corre este script
+        proc = subprocess.run([sys.executable, exec_path],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=timeout, text=True)
+    except subprocess.TimeoutExpired:
+        print(f"Timeout al ejecutar {exec_path}")
+        monitor.stop()
+        return
     except Exception as e:
-        print(f"Error al ejecutar {exec_path}")
+        print(f"Error lanzando {exec_path}: {e}")
         monitor.stop()
         return
 
-    if result.returncode != 0:
-        print(f"La ejecucion de {exec_path} ha fallado")
+    if proc.returncode != 0:
+        print(f"Ejecución fallida ({proc.returncode}). Stderr:\n{proc.stderr}")
         monitor.stop()
         return
 
-    print(f"{exec_path} ejecutado correctamente!")
-
+    print(f"{exec_path} ejecutado correctamente.")
     monitor.stop()
-    monitor.export_to_csv(exec_name, output_path)
-    print(f"Datos guardados en: {output_path}/{exec_name}_gpux.csv")
+
+    # exportar CSV por GPU con prefijo del ejecutable
+    monitor.export_to_csv(filename_prefix=exec_name, output_path=output_path, units="MiB")
+    print(f"Datos guardados en {output_path}/ con prefijo {exec_name}_")
+
+
+def contar_flops(model: torch.nn.Module, input_shape=(1, 3, 224, 224)) -> int:
+    model.eval()
+    device = next(model.parameters()).device if any(p.requires_grad for p in model.parameters()) else torch.device("cpu")
+    inputs = torch.randn(input_shape).to(device)
+    with torch.no_grad():
+        flops = FlopCountAnalysis(model, inputs)
+        # flops.total() devuelve un número (int/float)
+    return int(flops.total())
+
+
+def export_model_info(model: torch.nn.Module, output_dir: str = "Data", input_shape=(1, 3, 224, 224)):
+    """
+    Calcula los FLOPs de un modelo PyTorch y guarda la información en un archivo CSV.
+
+    Args:
+        model (torch.nn.Module): Modelo de PyTorch (ej. models.resnet50(pretrained=True)).
+        output_dir (str): Directorio donde guardar el archivo CSV.
+        input_shape (tuple): Forma de entrada para el cálculo de FLOPs.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    logger = logging.getLogger(__name__)
+
+    try:
+        # Se asume que la función contar_flops(model, input_shape) ya está definida
+        flops = contar_flops(model, input_shape=input_shape)
+    except Exception as e:
+        logger.warning(f"No se pudo calcular FLOPs: {e}")
+        flops = None
+
+    output_path = os.path.join(output_dir, "model_info.csv")
+
+    try:
+        with open(output_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['model_name', 'input_shape', 'flops', 'dtype'])
+            writer.writerow([
+                model.__class__.__name__,
+                str(input_shape),
+                flops if flops is not None else 'error',
+                str(next(model.parameters()).dtype)
+            ])
+        logger.info(f"Información del modelo guardada en {output_path}")
+    except Exception as e:
+        logger.error(f"Error al guardar la información del modelo: {e}")
+
+
 
 if __name__ == "__main__":
     args = parse_args()
 
     if not os.path.isdir(args.exec_dir):
         print(f"El directorio {args.exec_dir} no existe.")
-        exit(1)
+        sys.exit(1)
 
     ejecutables = [os.path.join(args.exec_dir, f)
                    for f in os.listdir(args.exec_dir)
@@ -158,7 +302,18 @@ if __name__ == "__main__":
 
     if not ejecutables:
         print(f"No se encontraron archivos ejecutables en {args.exec_dir}")
-        exit(0)
+        sys.exit(0)
 
+    # CTRL-C friendly: solo para parar el script principal
+    def _sigint_handler(signum, frame):
+        print("Interrupción recibida. Saliendo.")
+        sys.exit(1)
+    signal.signal(signal.SIGINT, _sigint_handler)
+
+    os.makedirs(args.output_dir, exist_ok=True)
     for exe in ejecutables:
-        execute_and_monitor(exec_path=exe, output_path=args.output_dir, interval=args.interval, min_w_usage=args.min_w_usage)
+        execute_and_monitor(exec_path=exe,
+                            output_path=args.output_dir,
+                            interval=args.interval,
+                            min_w_usage=args.min_w_usage,
+                            timeout=args.timeout)
