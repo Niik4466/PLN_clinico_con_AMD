@@ -55,7 +55,7 @@ class GpuMonitor:
 
         try:
             amdsmi_init()
-            self.devices = amdsmi_get_processor_handles()
+            self.gpus = amdsmi_get_processor_handles()
         except Exception as e:
             print("Error inicializando amdsmi:", e)
             self.gpus = []
@@ -93,21 +93,21 @@ class GpuMonitor:
             try:
                 if not start:
                     # nvmlDeviceGetPowerUsage devuelve mW
-                    start = any(nvmlDeviceGetPowerUsage(g) > self.min_w_usage for g in self.gpus)
+                    start = any(amdsmi_get_power_info(g)["average_socket_power"] > self.min_w_usage for g in self.gpus)
                 else:
                     for idx, g in enumerate(self.gpus):
-                        mem = amdsmi_get_gpu_vram_usage["vram_used"]
-                        pwr = amdsmi_get_power_info(g)["socket_power"]
+                        mem = amdsmi_get_gpu_vram_usage(g)["vram_used"]
+                        pwr = amdsmi_get_power_info(g)["average_socket_power"]
                         util = amdsmi_get_gpu_activity(g)
                         self.vram_usage[idx].append(float(mem))
                         self.power[idx].append(float(pwr))
                         self.util_gfx[idx].append(float(util['gfx_activity']))
                         self.util_umc[idx].append(float(util['umc_activity']))
-                        self.util_mm[idx].append(float(util['mm_activity']))
+                        self.util_mm[idx].append(float(0 if util['mm_activity'] == "N/A" else util['mm_activity']))
 
             except Exception as e:
                 # no abortar el hilo por un error momentáneo
-                print("Warning: error leyendo NVML:", e)
+                print("Warning: error leyendo amdsmi:", e)
             time.sleep(self.interval)
 
     def clear(self):

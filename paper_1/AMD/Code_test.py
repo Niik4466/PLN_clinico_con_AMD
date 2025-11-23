@@ -121,7 +121,7 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
 
 # ------------------ EXPORTAR INFO DEL MODELO EN CUESTION ---------------------
-export_model_info(model=model, output_dir='Data/model_info.csv')
+export_model_info(model=model, output_dir='Data/model_info')
 # -----------------------------------------------------------------------------
 
 def medir_eficiencia(model, monitor, num_iters=100, input_shape=(1, 3, 224, 224)):
@@ -139,7 +139,7 @@ def medir_eficiencia(model, monitor, num_iters=100, input_shape=(1, 3, 224, 224)
     with torch.no_grad():
         for _ in tqdm(range(num_iters), desc="Ejecutando iteraciones"):
             _ = model(dummy_input)
-            torch.cuda.synchronize()  # asegurar que se complete cada 
+            torch.cuda.synchronize()  # asegurar que se complete cada
 
     total_time = time.time() - start_time
     monitor.stop()
