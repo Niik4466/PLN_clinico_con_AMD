@@ -148,6 +148,7 @@ def medir_eficiencia(model, monitor, num_iters=100, input_shape=(1, 3, 224, 224)
     stats = monitor.get_stats()
     power_avg_w = stats.get("gpu_0_power_avg_w", None)
     energy_joules = power_avg_w * total_time if power_avg_w else None
+    util_avg = stats.get("gpu_0_util_avg", None)
 
     # calcular FLOPs totales
     flops_por_forward = contar_flops(model, input_shape)
@@ -166,6 +167,7 @@ def medir_eficiencia(model, monitor, num_iters=100, input_shape=(1, 3, 224, 224)
     print(f"Energía total: {energy_joules:.3f} J")
     print(f"FLOPs por forward: {flops_por_forward:,}")
     print(f"Eficiencia: {eficiencia:.3e} FLOPs/J" if eficiencia else "No se pudo calcular eficiencia")
+    print(f"Uso promedio: {util_avg:.3f}%")
 
     return {
         "num_iters": num_iters,
