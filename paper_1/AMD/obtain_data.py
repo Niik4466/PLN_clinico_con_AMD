@@ -18,176 +18,17 @@ from typing import List, Optional
 import torch
 from fvcore.nn import FlopCountAnalysis
 
-# Importamos amdsmi; si no esta, se deshabilita el monitor
-AMDSMI_AVAIBLE = False
+# --- Importar GPUMonitor desde la raíz ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+root_dir = os.path.abspath(os.path.join(current_dir, '..', '..'))
+if root_dir not in sys.path:
+    sys.path.append(root_dir)
+
 try:
-    import amdsmi
-    from amdsmi import (
-        amdsmi_init,
-        amdsmi_shut_down,
-        amdsmi_get_processor_handles,
-        amdsmi_get_gpu_vram_usage,
-        amdsmi_get_power_info,
-        amdsmi_get_gpu_activity,
-        AmdSmiUtilizationCounterType,
-        AmdSmiException,
-    )
-    AMDSMI_AVAIBLE = True
-except Exception:
-    AMDSMI_AVAIBLE = False
-
-
-class GpuMonitor:
-    def __init__(self, interval: float = 0.1, min_w_usage: int = 0):
-        """
-        interval: segundos entre mediciones
-        min_w_usage: umbral en mW para comenzar a registrar
-        """
-        self.interval = interval
-        self.min_w_usage = min_w_usage
-        self.running = False
-        self.thread = None
-
-        if not AMDSMI_AVAIBLE:
-            print("Aviso: amdsmi no está disponible. No se monitorizará GPU.")
-            self.gpus = []
-            return
-
-        try:
-            amdsmi_init()
-            self.gpus = amdsmi_get_processor_handles()
-        except Exception as e:
-            print("Error inicializando amdsmi:", e)
-            self.gpus = []
-
-        # almacenar series por GPU
-        self.vram_usage: List[List[float]] = [[] for _ in range(len(self.gpus))]
-        self.power: List[List[float]] = [[] for _ in range(len(self.gpus))]
-        self.util_gfx: List[List[float]] = [[] for _ in range(len(self.gpus))]
-        self.util_umc: List[List[float]] = [[] for _ in range(len(self.gpus))]
-        self.util_mm: List[List[float]] = [[] for _ in range(len(self.gpus))]
-
-    def start(self):
-        if self.running:
-            return
-        self.running = True
-        self.thread = threading.Thread(target=self._monitor, daemon=True)
-        self.thread.start()
-
-    def stop(self):
-        self.running = False
-        if self.thread:
-            self.thread.join(timeout=5.0)
-        if AMDSMI_AVAIBLE:
-            try:
-                amdsmi_shut_down()
-            except Exception:
-                pass
-
-    def _monitor(self):
-        start = False
-        while self.running:
-            if not self.gpus:
-                time.sleep(self.interval)
-                continue
-            try:
-                if not start:
-                    # nvmlDeviceGetPowerUsage devuelve mW
-                    start = any(amdsmi_get_power_info(g)["average_socket_power"] > self.min_w_usage for g in self.gpus)
-                else:
-                    for idx, g in enumerate(self.gpus):
-                        mem = amdsmi_get_gpu_vram_usage(g)["vram_used"]
-                        pwr = amdsmi_get_power_info(g)["average_socket_power"]
-                        util = amdsmi_get_gpu_activity(g)
-                        self.vram_usage[idx].append(float(mem))
-                        self.power[idx].append(float(pwr))
-                        self.util_gfx[idx].append(float(util['gfx_activity']))
-                        self.util_umc[idx].append(float(util['umc_activity']))
-                        self.util_mm[idx].append(float(0 if util['mm_activity'] == "N/A" else util['mm_activity']))
-
-            except Exception as e:
-                # no abortar el hilo por un error momentáneo
-                print("Warning: error leyendo amdsmi:", e)
-            time.sleep(self.interval)
-
-    def clear(self):
-        self.vram_usage = [[] for _ in range(len(self.gpus))]
-        self.power = [[] for _ in range(len(self.gpus))]
-        self.util_gfx = [[] for _ in range(len(self.gpus))]
-        self.util_umc = [[] for _ in range(len(self.gpus))]
-        self.util_mm = [[] for _ in range(len(self.gpus))]
-
-    def get_stats(self):
-        stats = {}
-        for i in range(len(self.gpus)):
-            stats[f"gpu_{i}_vram_avg_bytes"] = mean(self.vram_usage[i]) if self.vram_usage[i] else None
-            stats[f"gpu_{i}_power_avg_w"] = mean(self.power[i]) if self.power[i] else None
-            stats[f"gpu_{i}_util_avg_pct_gfx"] = mean(self.util_gfx[i]) if self.util_gfx[i] else None
-            stats[f"gpu_{i}_util_avg_pct_umc"] = mean(self.util_umc[i]) if self.util_umc[i] else None
-            stats[f"gpu_{i}_util_avg_pct_mm"] = mean(self.util_mm[i]) if self.util_mm[i] else None
-            stats[f"gpu_{i}_samples"] = len(self.vram_usage[i])
-        return stats
-
-    def export_to_csv(self, filename_prefix="gpu_stats", output_path="Data", units="MiB"):
-        """
-        units: "MiB" or "bytes"
-        """
-        os.makedirs(output_path, exist_ok=True)
-        for idx in range(len(self.gpus)):
-            filename = os.path.join(output_path, f"{filename_prefix}_gpu{idx}.csv")
-            with open(filename, mode='w', newline='') as f:
-                writer = csv.writer(f)
-                unit_label = "VRAM (MiB)" if units == "MiB" else "VRAM (Bytes)"
-                writer.writerow(["time_s", unit_label, "Power_W", "Util_pct_gfx", "Util_pct_umc", "Util_pct_mm"])
-                for i in range(len(self.vram_usage[idx])):
-                    vram_val = self.vram_usage[idx][i]
-                    if units == "MiB":
-                        vram_val = vram_val / (1024.0 * 1024.0)
-                    writer.writerow([
-                        round(i * self.interval, 6),
-                        vram_val,
-                        self.power[idx][i] if i < len(self.power[idx]) else None,
-                        self.util_gfx[idx][i] if i < len(self.util_gfx[idx]) else None,
-                        self.util_umc[idx][i] if i < len(self.util_umc[idx]) else None,
-                        self.util_mm[idx][i] if i < len(self.util_mm[idx]) else None
-                    ])
-
-    def export_epoch_resume(self, filename_prefix="epoch_resume", output_path="Data", epoch: int = 0):
-        """
-        Guarda/concatena resumen por época. Columnas: Epoch, Time_s, mean VRAM (MiB) GPU0.., mean Power GPU0.., mean Util GPU0..
-        """
-        os.makedirs(output_path, exist_ok=True)
-        filename = os.path.join(output_path, f"{filename_prefix}.csv")
-        file_exists = os.path.isfile(filename)
-
-        # construir row con medidas (usar MiB para legibilidad)
-        time_s = (len(self.vram_usage[0]) * self.interval) if self.vram_usage and self.vram_usage[0] else 0.0
-        mean_vram = [(mean(l) / (1024.0 * 1024.0)) if l else None for l in self.vram_usage]
-        mean_power = [mean(l) if l else None for l in self.power]
-        mean_util_gfx = [mean(l) if l else None for l in self.util_gfx]
-        mean_util_umc = [mean(l) if l else None for l in self.util_umc]
-        mean_util_mm = [mean(l) if l else None for l in self.util_mm]
-
-        with open(filename, mode='a', newline='') as f:
-            writer = csv.writer(f)
-            if not file_exists:
-                header = ["Epoch", "Time_s"] + \
-                    [f"Mean_VRAM_MiB_GPU{i}" for i in range(len(self.gpus))] + \
-                    [f"Mean_Power_W_GPU{i}" for i in range(len(self.gpus))] + \
-                    [f"Mean_Util_pct_GPU{i}" for i in range(len(self.gpus))] + \
-                    [f"Mean_Util_pct_gfx_GPU{i}" for i in range(len(self.gpus))] + \
-                    [f"Mean_Util_pct_umc_GPU{i}" for i in range(len(self.gpus))] + \
-                    [f"Mean_Util_pct_mm_GPU{i}" for i in range(len(self.gpus))]
-                writer.writerow(header)
-
-            row = [epoch, round(time_s, 6)] + \
-                [round(v, 6) if v is not None else "" for v in mean_vram] + \
-                [round(p, 6) if p is not None else "" for p in mean_power] + \
-                [round(u, 6) if u is not None else "" for u in mean_util_gfx] + \
-                [round(u, 6) if u is not None else "" for u in mean_util_umc] + \
-                [round(u, 6) if u is not None else "" for u in mean_util_mm]
-
-            writer.writerow(row)
+    from GPUMonitor import GpuMonitor
+except ImportError:
+    print("Error: No se pudo importar GPUMonitor. Asegúrate de que la carpeta GPUMonitor existe en la raíz.")
+    sys.exit(1)
 
 
 def parse_args():
@@ -286,7 +127,6 @@ def export_model_info(model: torch.nn.Module, output_dir: str = "Data", input_sh
         logger.info(f"Información del modelo guardada en {output_path}")
     except Exception as e:
         logger.error(f"Error al guardar la información del modelo: {e}")
-
 
 
 if __name__ == "__main__":
