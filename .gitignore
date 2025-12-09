@@ -37,7 +37,7 @@ Thumbs.db
 
 # Project specific
 Data/
-data/
+!paper_2/*/data/
 Results/
 results/
 *.log
