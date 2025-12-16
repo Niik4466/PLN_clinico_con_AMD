@@ -1,4 +1,4 @@
-FROM rocm/pytorch:rocm6.3.3_ubuntu20.04_py3.9_pytorch_release_2.2.1
+FROM rocm/pytorch:rocm6.3.3_ubuntu22.04_py3.9_pytorch_release_2.4.0
 
 COPY paper_1/AMD/requirements.txt /tmp/requirements.txt
 RUN pip install -r /tmp/requirements.txt

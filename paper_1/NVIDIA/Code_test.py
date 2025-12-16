@@ -125,10 +125,14 @@ model = model.to(device)
 export_model_info(model=model, output_dir='Data/model_info.csv')
 # -----------------------------------------------------------------------------
 
-def medir_eficiencia(model, monitor, num_iters=100, input_shape=(1, 3, 224, 224)):
+def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(3, 224, 224)):
     model.eval()
     device = next(model.parameters()).device
-    dummy_input = torch.randn(input_shape, device=device)
+    
+    # Construir input con dimension de batch
+    # Nota: input_shape debe ser (C, H, W)
+    full_input_shape = (batch_size, *input_shape)
+    dummy_input = torch.randn(full_input_shape, device=device)
 
     # iniciar monitor
     monitor.clear()
@@ -152,7 +156,8 @@ def medir_eficiencia(model, monitor, num_iters=100, input_shape=(1, 3, 224, 224)
     util_avg = stats.get("gpu_0_util_avg_pct", None)
 
     # calcular FLOPs totales
-    flops_por_forward = contar_flops(model, input_shape)
+    # contar_flops espera el shape completo (B, C, H, W)
+    flops_por_forward = contar_flops(model, full_input_shape)
     total_flops = flops_por_forward * num_iters
 
     # calcular eficiencia
@@ -160,10 +165,17 @@ def medir_eficiencia(model, monitor, num_iters=100, input_shape=(1, 3, 224, 224)
         eficiencia = total_flops / energy_joules  # FLOPs/J
     else:
         eficiencia = None
+        
+    # Calcular throughput
+    total_samples = num_iters * batch_size
+    throughput = total_samples / total_time if total_time > 0 else 0
 
     print("\n=== Resultados ===")
-    print(f"Pasadas totales: {num_iters}")
+    print(f"Batch Size: {batch_size}")
+    print(f"Pasadas totales (Iterations): {num_iters}")
+    print(f"Total muestras: {total_samples}")
     print(f"Tiempo total: {total_time:.3f} s")
+    print(f"Throughput: {throughput:.2f} samples/s")
     print(f"Potencia promedio: {power_avg_w:.3f} W")
     print(f"Energía total: {energy_joules:.3f} J")
     print(f"FLOPs por forward: {flops_por_forward:,}")
@@ -172,7 +184,9 @@ def medir_eficiencia(model, monitor, num_iters=100, input_shape=(1, 3, 224, 224)
 
     return {
         "num_iters": num_iters,
+        "batch_size": batch_size,
         "total_time_s": total_time,
+        "throughput_samples_s": throughput,
         "power_avg_w": power_avg_w,
         "energy_j": energy_joules,
         "flops_forward": flops_por_forward,
@@ -182,4 +196,4 @@ def medir_eficiencia(model, monitor, num_iters=100, input_shape=(1, 3, 224, 224)
 
 monitor = GpuMonitor(interval=0.05, min_w_usage=10)
 
-resultados = medir_eficiencia(model, monitor, num_iters=100000)
+resultados = medir_eficiencia(model, monitor, num_iters=10000, batch_size=32)
