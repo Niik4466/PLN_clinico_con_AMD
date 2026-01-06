@@ -8,6 +8,7 @@ from typing import List, Optional
 # --- Detección de librerías ---
 AMDSMI_AVAILABLE = False
 NVML_AVAILABLE = False
+TORCH_AVAILABLE = False
 
 # Intentar importar amdsmi
 try:
@@ -38,6 +39,15 @@ try:
         nvmlDeviceGetUtilizationRates,
     )
     NVML_AVAILABLE = True
+except ImportError:
+    pass
+except Exception:
+    pass
+
+# Intentar importar torch (fallback para VRAM en AMD)
+try:
+    import torch
+    TORCH_AVAILABLE = torch.cuda.is_available()
 except ImportError:
     pass
 except Exception:
@@ -123,11 +133,17 @@ class GpuMonitor:
         self.thread.start()
 
     def stop(self):
+        """Para el thread de monitoreo pero NO cierra el backend.
+        Esto permite reutilizar el monitor múltiples veces."""
         self.running = False
         if self.thread:
             self.thread.join(timeout=5.0)
-        
-        # Shutdown backend
+        # Nota: NO llamamos a nvmlShutdown/amdsmi_shut_down aquí
+        # para permitir reutilizar el monitor. Usar shutdown() explícitamente.
+
+    def shutdown(self):
+        """Cierra el backend completamente. Llamar solo una vez al final del programa."""
+        self.stop()  # Asegurar que el thread está detenido
         if self.backend == 'AMD':
             try:
                 amdsmi_shut_down()
@@ -138,6 +154,13 @@ class GpuMonitor:
                 nvmlShutdown()
             except:
                 pass
+        self.backend = None
+        self.gpus = []
+
+    def __del__(self):
+        """Destructor: intenta cerrar el backend si no se hizo explícitamente."""
+        if self.backend:
+            self.shutdown()
 
     def _monitor(self):
         start_recording = False
@@ -165,18 +188,23 @@ class GpuMonitor:
                 if start_recording:
                     for idx, g in enumerate(self.gpus):
                         if self.backend == 'AMD':
-                            mem = amdsmi_get_gpu_vram_usage(g)["vram_used"]
-                            pwr = amdsmi_get_power_info(g)["average_socket_power"] # mW? El original lo trata como W en export? 
-                            # Revisando original AMD: self.power[idx].append(float(pwr)) y luego exporta.
-                            # Revisando original NVIDIA: pwr = nvmlDeviceGetPowerUsage(g) / 1000.0 # a W
+                            # Intentar obtener VRAM de amdsmi
+                            mem = 0
+                            try:
+                                vram_info = amdsmi_get_gpu_vram_usage(g)
+                                mem = vram_info.get("vram_used", 0) or vram_info.get("used", 0)
+                            except:
+                                pass
                             
-                            # Para unificar, guardaremos en Watts en la lista interna.
-                            # Si amdsmi devuelve W o mW depende de la versión/tarjeta, pero el original no dividía.
-                            # Asumiremos que el original AMD estaba correcto para su entorno.
-                            # PERO, si el usuario dice "min_w_usage" en mW, y el original comparaba directo...
-                            # Vamos a mantener la lógica original de cada uno para la lectura.
+                            # Fallback a PyTorch si amdsmi reporta < 1MB (bug en ROCm 6.3.3)
+                            if mem < 1024 * 1024 and TORCH_AVAILABLE:
+                                try:
+                                    mem = torch.cuda.memory_allocated(idx)
+                                except:
+                                    pass
                             
-                            # AMD Original: pwr directo.
+                            pwr = amdsmi_get_power_info(g)["average_socket_power"]
+                            
                             self.vram_usage[idx].append(float(mem))
                             self.power[idx].append(float(pwr)) 
                             
