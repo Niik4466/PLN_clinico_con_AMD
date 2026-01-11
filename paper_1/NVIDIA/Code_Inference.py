@@ -155,15 +155,17 @@ def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(
     energy_joules = power_avg_w * total_time if power_avg_w else None
     util_avg = stats.get("gpu_0_util_avg_pct", None)
 
+    # Calcular throughput
+    total_samples = num_iters * batch_size
+    throughput = total_samples / total_time if total_time > 0 else 0
+
+
     # calcular eficiencia (Samples/Joule)
     if energy_joules and energy_joules > 0:
         eficiencia = total_samples / energy_joules  # Samples/J
     else:
         eficiencia = None
         
-    # Calcular throughput
-    total_samples = num_iters * batch_size
-    throughput = total_samples / total_time if total_time > 0 else 0
 
     print("\n=== Resultados ===")
     print(f"Batch Size: {batch_size}")
