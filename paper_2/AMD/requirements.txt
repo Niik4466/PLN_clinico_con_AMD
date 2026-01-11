@@ -2,4 +2,5 @@ pandas
 torch
 transformers==4.40.0
 scikit-learn
-pyamdgpuinfo
+amdsmi
+tqdm
