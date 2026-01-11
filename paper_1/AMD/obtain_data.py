@@ -16,7 +16,6 @@ import signal
 from statistics import mean
 from typing import List, Optional
 import torch
-from fvcore.nn import FlopCountAnalysis
 
 # --- Importar GPUMonitor desde la raíz ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -82,15 +81,6 @@ def execute_and_monitor(exec_path, output_path="Data", interval=0.1, min_w_usage
     monitor.export_to_csv(filename_prefix=exec_name, output_path=output_path, units="MiB")
     print(f"Datos guardados en {output_path}/ con prefijo {exec_name}_")
 
-
-def contar_flops(model: torch.nn.Module, input_shape=(1, 3, 224, 224)) -> int:
-    model.eval()
-    device = next(model.parameters()).device if any(p.requires_grad for p in model.parameters()) else torch.device("cpu")
-    inputs = torch.randn(input_shape).to(device)
-    with torch.no_grad():
-        flops = FlopCountAnalysis(model, inputs)
-        # flops.total() devuelve un número (int/float)
-    return int(flops.total())
 
 
 def export_model_info(model: torch.nn.Module, output_dir: str = "Data", input_shape=(1, 3, 224, 224)):
