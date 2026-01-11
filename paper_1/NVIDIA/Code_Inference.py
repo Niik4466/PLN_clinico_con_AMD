@@ -1,5 +1,5 @@
 # Medicion de metricas
-from obtain_data import GpuMonitor, contar_flops, export_model_info
+from obtain_data import GpuMonitor, export_model_info
 
 import csv
 import os
@@ -155,14 +155,9 @@ def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(
     energy_joules = power_avg_w * total_time if power_avg_w else None
     util_avg = stats.get("gpu_0_util_avg_pct", None)
 
-    # calcular FLOPs totales
-    # contar_flops espera el shape completo (B, C, H, W)
-    flops_por_forward = contar_flops(model, full_input_shape)
-    total_flops = flops_por_forward * num_iters
-
-    # calcular eficiencia
+    # calcular eficiencia (Samples/Joule)
     if energy_joules and energy_joules > 0:
-        eficiencia = total_flops / energy_joules  # FLOPs/J
+        eficiencia = total_samples / energy_joules  # Samples/J
     else:
         eficiencia = None
         
@@ -178,8 +173,7 @@ def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(
     print(f"Throughput: {throughput:.2f} samples/s")
     print(f"Potencia promedio: {power_avg_w:.3f} W")
     print(f"Energía total: {energy_joules:.3f} J")
-    print(f"FLOPs por forward: {flops_por_forward:,}")
-    print(f"Eficiencia: {eficiencia:.3e} FLOPs/J" if eficiencia else "No se pudo calcular eficiencia")
+    print(f"Eficiencia: {eficiencia:.3f} Samples/J" if eficiencia else "No se pudo calcular eficiencia")
     print(f"Uso promedio: {util_avg:.3f}%")
 
     return {
@@ -189,9 +183,7 @@ def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(
         "throughput_samples_s": throughput,
         "power_avg_w": power_avg_w,
         "energy_j": energy_joules,
-        "flops_forward": flops_por_forward,
-        "total_flops": total_flops,
-        "efficiency_flops_per_joule": eficiencia
+        "efficiency_samples_per_joule": eficiencia
     }
 
 monitor = GpuMonitor(interval=0.05, min_w_usage=10)

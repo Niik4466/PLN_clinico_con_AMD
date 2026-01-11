@@ -13,7 +13,7 @@ from tqdm import tqdm
 import logging
 import multiprocessing
 import time
-from obtain_data import GpuMonitor, contar_flops
+from obtain_data import GpuMonitor
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -156,6 +156,7 @@ monitor.start()
 start_time = time.time()
 
 if len(train_loader) > 0:
+    total_images_processed = 0
     for epoch in range(num_epochs):
         logger.info(f'Epoch {epoch}/{num_epochs - 1}')
         print('-' * 10)
@@ -176,6 +177,9 @@ if len(train_loader) > 0:
             for inputs, labels in tqdm(dataloader):
                 inputs = inputs.to(device)
                 labels = labels.to(device).float().unsqueeze(1)
+                
+                # Count images processed
+                total_images_processed += inputs.size(0)
 
                 # Zero the parameter gradients
                 optimizer.zero_grad()
@@ -235,26 +239,16 @@ power_avg_w = stats.get("gpu_0_power_avg_w", None)
 energy_joules = power_avg_w * total_time if power_avg_w else None
 util_avg = stats.get("gpu_0_util_avg_pct_gfx", None)
 
-# Calculate FLOPs
-# We assume input size is (BATCH_SIZE, 3, 224, 224)
-dummy_shape = (BATCH_SIZE, 3, 224, 224)
-flops_forward_batch = contar_flops(model, dummy_shape)
+# Calculate Throughput
+throughput = total_images_processed / total_time if total_time > 0 else 0
 
-# Total FLOPs estimation for training:
-# Total Batches = len(train_loader) * num_epochs
-# FLOPs per batch step ≈ 3 * Forward FLOPs (1 Forward + 2 Backward)
-total_train_steps = len(train_loader) * num_epochs
-total_flops = total_train_steps * flops_forward_batch * 3
 
 # Calculate Efficiency
 if energy_joules and energy_joules > 0:
-    efficiency = total_flops / energy_joules
+    efficiency = total_images_processed / energy_joules  # Samples/J
 else:
     efficiency = None
 
-# Calculate Throughput
-total_samples = len(train_dataset) * num_epochs
-throughput = total_samples / total_time if total_time > 0 else 0
 
 print("\n=== Training Results ===")
 print(f"Batch Size: {BATCH_SIZE}")
@@ -263,8 +257,7 @@ print(f"Total Time: {total_time:.3f} s")
 print(f"Throughput: {throughput:.2f} samples/s")
 print(f"Average Power: {power_avg_w:.3f} W")
 print(f"Total Energy: {energy_joules:.3f} J")
-print(f"Total FLOPs (est): {total_flops:,}")
-print(f"Efficiency: {efficiency:.3e} FLOPs/J" if efficiency else "Efficiency: N/A")
+print(f"Efficiency: {efficiency:.3f} Samples/J" if efficiency else "Efficiency: N/A")
 print(f"Avg GPU Util: {util_avg:.3f} %")
 print("========================")
 
