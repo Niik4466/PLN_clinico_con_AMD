@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime
+FROM pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime
 
 COPY paper_1/NVIDIA/requirements.txt /tmp/requirements.txt
 RUN pip install -r /tmp/requirements.txt
