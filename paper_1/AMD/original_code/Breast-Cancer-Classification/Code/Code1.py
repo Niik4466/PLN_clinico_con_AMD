@@ -1,7 +1,3 @@
-# Medicion de metricas
-from obtain_data import GpuMonitor, export_model_info
-
-import csv
 import os
 import numpy as np
 import matplotlib.pyplot as plt
@@ -15,11 +11,6 @@ import torch.optim as optim
 from PIL import Image
 from tqdm import tqdm
 import logging
-import torch
-import time
-from statistics import mean
-
-
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -121,73 +112,129 @@ model.fc = nn.Sequential(
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
 
-# ------------------ EXPORTAR INFO DEL MODELO EN CUESTION ---------------------
-export_model_info(model=model, output_dir='Data/model_info.csv')
-# -----------------------------------------------------------------------------
+# Loss function and optimizer
+criterion = nn.BCEWithLogitsLoss()
+optimizer = optim.Adam(model.parameters(), lr=0.0001)
 
-def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(3, 224, 224)):
-    model.eval()
-    device = next(model.parameters()).device
-    
-    # Construir input con dimension de batch
-    # Nota: input_shape debe ser (C, H, W)
-    full_input_shape = (batch_size, *input_shape)
-    dummy_input = torch.randn(full_input_shape, device=device)
+# Learning rate scheduler
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5, verbose=True)
 
-    # iniciar monitor
-    monitor.clear()
-    monitor.start()
+# Early stopping
+early_stopping_patience = 5
+early_stopping_counter = 0
+best_loss = float('inf')
 
-    torch.cuda.synchronize()
-    start_time = time.time()
+# Training and evaluation
+num_epochs = 10
+best_model_wts = None
 
-    with torch.no_grad():
-        for _ in tqdm(range(num_iters), desc="Ejecutando iteraciones"):
-            _ = model(dummy_input)
-            torch.cuda.synchronize()  # asegurar que se complete cada 
+train_acc_history, val_acc_history = [], []
+train_loss_history, val_loss_history = [], []
 
-    total_time = time.time() - start_time
-    monitor.stop()
+logger.info('Starting training...')
+for epoch in range(num_epochs):
+    logger.info(f'Epoch {epoch}/{num_epochs - 1}')
+    print('-' * 10)
 
-    # obtener estadísticas de GPU
-    stats = monitor.get_stats()
-    power_avg_w = stats.get("gpu_0_power_avg_w", None)
-    energy_joules = power_avg_w * total_time if power_avg_w else None
-    util_avg = stats.get("gpu_0_util_avg_pct", None)
+    # Each epoch has a training and validation phase
+    for phase in ['train', 'val']:
+        if phase == 'train':
+            model.train()  # Set model to training mode
+            dataloader = train_loader
+        else:
+            model.eval()   # Set model to evaluate mode
+            dataloader = val_loader
 
-    # Calcular throughput
-    total_samples = num_iters * batch_size
-    throughput = total_samples / total_time if total_time > 0 else 0
+        running_loss = 0.0
+        running_corrects = 0
 
+        # Iterate over data
+        for inputs, labels in tqdm(dataloader):
+            inputs = inputs.to(device)
+            labels = labels.to(device).float().unsqueeze(1)
 
-    # calcular eficiencia (Samples/Joule)
-    if energy_joules and energy_joules > 0:
-        eficiencia = total_samples / energy_joules  # Samples/J
-    else:
-        eficiencia = None
-        
+            # Zero the parameter gradients
+            optimizer.zero_grad()
 
-    print("\n=== Resultados ===")
-    print(f"Batch Size: {batch_size}")
-    print(f"Pasadas totales (Iterations): {num_iters}")
-    print(f"Total muestras: {total_samples}")
-    print(f"Tiempo total: {total_time:.3f} s")
-    print(f"Throughput: {throughput:.2f} samples/s")
-    print(f"Potencia promedio: {power_avg_w:.3f} W")
-    print(f"Energía total: {energy_joules:.3f} J")
-    print(f"Eficiencia: {eficiencia:.3f} Samples/J" if eficiencia else "No se pudo calcular eficiencia")
-    print(f"Uso promedio: {util_avg:.3f}%")
+            # Forward
+            with torch.set_grad_enabled(phase == 'train'):
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                preds = torch.sigmoid(outputs) > 0.5
 
-    return {
-        "num_iters": num_iters,
-        "batch_size": batch_size,
-        "total_time_s": total_time,
-        "throughput_samples_s": throughput,
-        "power_avg_w": power_avg_w,
-        "energy_j": energy_joules,
-        "efficiency_samples_per_joule": eficiencia
-    }
+                # Backward + optimize only if in training phase
+                if phase == 'train':
+                    loss.backward()
+                    optimizer.step()
 
-monitor = GpuMonitor(interval=0.05, min_w_usage=10)
+            # Statistics
+            running_loss += loss.item() * inputs.size(0)
+            running_corrects += torch.sum(preds == labels.data)
 
-resultados = medir_eficiencia(model, monitor, num_iters=10000, batch_size=32)
+        epoch_loss = running_loss / len(dataloader.dataset)
+        epoch_acc = running_corrects.double() / len(dataloader.dataset)
+
+        if phase == 'train':
+            train_acc_history.append(epoch_acc.cpu().numpy())
+            train_loss_history.append(epoch_loss)
+        else:
+            val_acc_history.append(epoch_acc.cpu().numpy())
+            val_loss_history.append(epoch_loss)
+
+            # Deep copy the model
+            if epoch_loss < best_loss:
+                best_loss = epoch_loss
+                best_model_wts = model.state_dict()
+                early_stopping_counter = 0
+            else:
+                early_stopping_counter += 1
+
+        logger.info(f'{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
+
+    scheduler.step(epoch_loss)
+
+    if early_stopping_counter >= early_stopping_patience:
+        logger.info('Early stopping triggered')
+        break
+
+logger.info('Training complete')
+
+# Load best model weights
+model.load_state_dict(best_model_wts)
+
+# Evaluate on test set
+logger.info('Evaluating on test set...')
+model.eval()
+all_preds = []
+all_labels = []
+
+for inputs, labels in test_loader:
+    inputs = inputs.to(device)
+    labels = labels.to(device).float().unsqueeze(1)
+    outputs = model(inputs)
+    preds = torch.sigmoid(outputs) > 0.5
+    all_preds.append(preds.cpu().numpy())
+    all_labels.append(labels.cpu().numpy())
+
+all_preds = np.concatenate(all_preds)
+all_labels = np.concatenate(all_labels)
+
+logger.info('Generating classification report...')
+print(classification_report(all_labels, all_preds, target_names=['0', '1']))
+
+# Plot Accuracy and Loss
+logger.info('Plotting accuracy and loss...')
+plt.figure(figsize=(14, 5))
+plt.subplot(1, 2, 1)
+plt.plot(train_acc_history, label='Training accuracy')
+plt.plot(val_acc_history, label='Validation accuracy')
+plt.title('Training and validation accuracy')
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.plot(train_loss_history, label='Training loss')
+plt.plot(val_loss_history, label='Validation loss')
+plt.title('Training and validation loss')
+plt.legend()
+
+plt.savefig('/home/data3/Ali/Code/Saina/Brea/OutPut/figure1_3.png')

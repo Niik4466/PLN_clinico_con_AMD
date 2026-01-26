@@ -148,15 +148,13 @@ train_acc_history, val_acc_history = [], []
 train_loss_history, val_loss_history = [], []
 
 # Initialize Monitor
-monitor = GpuMonitor(interval=0.1) # Monitor interval in seconds
+monitor = GpuMonitor(interval=0.1, min_w_usage=40) # Monitor interval in seconds
 
 logger.info('Starting training...')
 monitor.clear()
-monitor.start()
-start_time = time.time()
-
 if len(train_loader) > 0:
     total_images_processed = 0
+    total_training_time = 0
     for epoch in range(num_epochs):
         logger.info(f'Epoch {epoch}/{num_epochs - 1}')
         print('-' * 10)
@@ -166,6 +164,8 @@ if len(train_loader) > 0:
             if phase == 'train':
                 model.train()  # Set model to training mode
                 dataloader = train_loader
+                monitor.start()
+                phase_start_time = time.time()
             else:
                 model.eval()   # Set model to evaluate mode
                 dataloader = val_loader
@@ -179,7 +179,8 @@ if len(train_loader) > 0:
                 labels = labels.to(device).float().unsqueeze(1)
                 
                 # Count images processed
-                total_images_processed += inputs.size(0)
+                if phase == 'train':
+                    total_images_processed += inputs.size(0)
 
                 # Zero the parameter gradients
                 optimizer.zero_grad()
@@ -198,6 +199,11 @@ if len(train_loader) > 0:
                 # Statistics
                 running_loss += loss.item() * inputs.size(0)
                 running_corrects += torch.sum(preds == labels.data)
+            
+            if phase == 'train':
+                monitor.stop()
+                phase_duration = time.time() - phase_start_time
+                total_training_time += phase_duration
 
             epoch_loss = running_loss / len(dataloader.dataset)
             epoch_acc = running_corrects.double() / len(dataloader.dataset)
@@ -227,9 +233,8 @@ if len(train_loader) > 0:
 else:
     logger.warning("Train loader is empty, skipping training loop.")
 
-monitor.stop()
-end_time = time.time()
-total_time = end_time - start_time
+# monitor.stop() call is handled inside loop
+total_time = total_training_time
 
 logger.info('Training complete')
 
@@ -248,72 +253,13 @@ else:
 # Calculate Throughput
 throughput = total_images_processed / total_time if total_time > 0 else 0
 
-print("\n=== Training Results ===")
+print("\n=== Training Results Resnet-50 NVIDIA ===")
 print(f"Batch Size: {BATCH_SIZE}")
 print(f"Epochs: {num_epochs}")
 print(f"Total Time: {total_time:.3f} s")
-print(f"Throughput: {throughput:.2f} samples/s")
+print(f"Throughput: {throughput:.2f} Images/s")
 print(f"Average Power: {power_avg_w:.3f} W")
 print(f"Total Energy: {energy_joules:.3f} J")
-print(f"Efficiency: {efficiency:.3f} Samples/J" if efficiency else "Efficiency: N/A")
+print(f"Efficiency: {efficiency:.3f} Images/J" if efficiency else "Efficiency: N/A")
 print(f"Avg GPU Util: {util_avg:.3f} %")
 print("========================")
-
-# # Load best model weights
-# if best_model_wts:
-#     model.load_state_dict(best_model_wts)
-
-# # Evaluate on test set
-# logger.info('Evaluating on test set...')
-# model.eval()
-# all_preds = []
-# all_labels = []
-
-# if len(test_loader) > 0:
-#     for inputs, labels in test_loader:
-#         inputs = inputs.to(device)
-#         labels = labels.to(device).float().unsqueeze(1)
-#         outputs = model(inputs)
-#         preds = torch.sigmoid(outputs) > 0.5
-#         all_preds.append(preds.cpu().numpy())
-#         all_labels.append(labels.cpu().numpy())
-
-#     all_preds = np.concatenate(all_preds)
-#     all_labels = np.concatenate(all_labels)
-
-#     logger.info('Generating classification report...')
-#     print(classification_report(all_labels, all_preds, target_names=['0', '1']))
-# else:
-#     logger.warning("Test loader is empty, skipping evaluation.")
-
-# # Plot Accuracy and Loss
-# logger.info('Plotting accuracy and loss...')
-# plt.figure(figsize=(14, 5))
-# plt.subplot(1, 2, 1)
-# plt.plot(train_acc_history, label='Training accuracy')
-# plt.plot(val_acc_history, label='Validation accuracy')
-# plt.title('Training and validation accuracy')
-# plt.legend()
-
-# plt.subplot(1, 2, 2)
-# plt.plot(train_loss_history, label='Training loss')
-# plt.plot(val_loss_history, label='Validation loss')
-# plt.title('Training and validation loss')
-# plt.legend()
-
-# # Saving the figure with a new name to distinguish from original
-# output_path = '/home/data3/Ali/Code/Saina/Brea/OutPut/figure1_3_optimized.png'
-# # Ensure directory exists if possible, otherwise use local or keep original path structure assumption
-# if os.path.exists(os.path.dirname(output_path)):
-#     plt.savefig(output_path)
-#     logger.info(f"Saved figure to {output_path}")
-# else:
-#     # If the path doesn't exist (maybe different environment), try saving locally or warn
-#     # Stick to original logic but maybe handle exception
-#     try:
-#         plt.savefig(output_path)
-#     except Exception as e:
-#         logger.warning(f"Could not save figure to {output_path}: {e}")
-#         # Try local save
-#         plt.savefig('figure1_3_optimized.png')
-#         logger.info("Saved figure to local directory as figure1_3_optimized.png")
