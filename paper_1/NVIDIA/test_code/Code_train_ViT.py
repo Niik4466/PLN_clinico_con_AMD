@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
-from torchvision import models, transforms
+from torchvision import transforms
 from torch.utils.data import DataLoader, Dataset
 import torch
 import torch.nn as nn
@@ -14,6 +14,7 @@ import logging
 import multiprocessing
 import time
 from obtain_data import GpuMonitor
+from transformers import ViTForImageClassification, ViTFeatureExtractor
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -78,22 +79,32 @@ else:
     train_paths, val_paths, test_paths = [], [], []
     train_labels, val_labels, test_labels = [], [], []
 
-# Data transforms without augmentation
+# Data transforms
+# Load feature extractor for ViT normalization constants
+try:
+    feature_extractor = ViTFeatureExtractor.from_pretrained('google/vit-base-patch16-224-in21k')
+    image_mean = feature_extractor.image_mean
+    image_std = feature_extractor.image_std
+except Exception as e:
+    logger.warning(f"Could not load ViTFeatureExtractor: {e}. Using default ImageNet stats.")
+    image_mean = [0.485, 0.456, 0.406]
+    image_std = [0.229, 0.224, 0.225]
+
 data_transforms = {
     'train': transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        transforms.Normalize(mean=image_mean, std=image_std)
     ]),
     'val': transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        transforms.Normalize(mean=image_mean, std=image_std)
     ]),
     'test': transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        transforms.Normalize(mean=image_mean, std=image_std)
     ]),
 }
 
@@ -105,7 +116,6 @@ test_dataset = IDCDataset(test_paths, test_labels, transform=data_transforms['te
 
 # Create dataloaders
 logger.info('Creating dataloaders...')
-# Modifications: batch_size=256, num_workers>1 (setting to 4), pin_memory=True
 BATCH_SIZE = 256
 NUM_WORKERS = 4 
 
@@ -113,16 +123,9 @@ train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, nu
 val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
 test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=NUM_WORKERS, pin_memory=True)
 
-# Load the pretrained ResNet-50 model
-logger.info('Loading pretrained ResNet-50 model...')
-model = models.resnet50(pretrained=True)
-
-# Modify the final layer for binary classification with dropout
-num_ftrs = model.fc.in_features
-model.fc = nn.Sequential(
-    nn.Dropout(0.5),
-    nn.Linear(num_ftrs, 1)
-)
+# Load the pretrained ViT model
+logger.info('Loading pretrained Vision Transformer model...')
+model = ViTForImageClassification.from_pretrained('google/vit-base-patch16-224-in21k', num_labels=1)
 
 # Move the model to GPU if available
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -130,7 +133,7 @@ model = model.to(device)
 
 # Loss function and optimizer
 criterion = nn.BCEWithLogitsLoss()
-optimizer = optim.Adam(model.parameters(), lr=0.0001)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 # Learning rate scheduler
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=5)
@@ -148,15 +151,14 @@ train_acc_history, val_acc_history = [], []
 train_loss_history, val_loss_history = [], []
 
 # Initialize Monitor
-monitor = GpuMonitor(interval=0.1) # Monitor interval in seconds
+monitor = GpuMonitor(interval=0.1, min_w_usage=40) # Monitor interval in seconds
 
 logger.info('Starting training...')
 monitor.clear()
-monitor.start()
-start_time = time.time()
 
 if len(train_loader) > 0:
     total_images_processed = 0
+    total_training_time = 0
     for epoch in range(num_epochs):
         logger.info(f'Epoch {epoch}/{num_epochs - 1}')
         print('-' * 10)
@@ -166,6 +168,8 @@ if len(train_loader) > 0:
             if phase == 'train':
                 model.train()  # Set model to training mode
                 dataloader = train_loader
+                monitor.start()
+                phase_start_time = time.time()
             else:
                 model.eval()   # Set model to evaluate mode
                 dataloader = val_loader
@@ -179,14 +183,15 @@ if len(train_loader) > 0:
                 labels = labels.to(device).float().unsqueeze(1)
                 
                 # Count images processed
-                total_images_processed += inputs.size(0)
+                if phase == 'train':
+                    total_images_processed += inputs.size(0)
 
                 # Zero the parameter gradients
                 optimizer.zero_grad()
 
                 # Forward
                 with torch.set_grad_enabled(phase == 'train'):
-                    outputs = model(inputs)
+                    outputs = model(inputs).logits
                     loss = criterion(outputs, labels)
                     preds = torch.sigmoid(outputs) > 0.5
 
@@ -198,6 +203,11 @@ if len(train_loader) > 0:
                 # Statistics
                 running_loss += loss.item() * inputs.size(0)
                 running_corrects += torch.sum(preds == labels.data)
+            
+            if phase == 'train':
+                monitor.stop()
+                phase_duration = time.time() - phase_start_time
+                total_training_time += phase_duration
 
             epoch_loss = running_loss / len(dataloader.dataset)
             epoch_acc = running_corrects.double() / len(dataloader.dataset)
@@ -227,9 +237,8 @@ if len(train_loader) > 0:
 else:
     logger.warning("Train loader is empty, skipping training loop.")
 
-monitor.stop()
-end_time = time.time()
-total_time = end_time - start_time
+# monitor.stop() call is handled inside loop
+total_time = total_training_time
 
 logger.info('Training complete')
 
@@ -237,11 +246,7 @@ logger.info('Training complete')
 stats = monitor.get_stats()
 power_avg_w = stats.get("gpu_0_power_avg_w", None)
 energy_joules = power_avg_w * total_time if power_avg_w else None
-util_avg = stats.get("gpu_0_util_avg_pct_gfx", None)
-
-# Calculate Throughput
-throughput = total_images_processed / total_time if total_time > 0 else 0
-
+util_avg = stats.get("gpu_0_util_avg_pct", None)
 
 # Calculate Efficiency
 if energy_joules and energy_joules > 0:
@@ -249,73 +254,16 @@ if energy_joules and energy_joules > 0:
 else:
     efficiency = None
 
+# Calculate Throughput
+throughput = total_images_processed / total_time if total_time > 0 else 0
 
-print("\n=== Training Results ===")
+print("\n=== Training Results ViT Train NVIDIA ===")
 print(f"Batch Size: {BATCH_SIZE}")
 print(f"Epochs: {num_epochs}")
 print(f"Total Time: {total_time:.3f} s")
-print(f"Throughput: {throughput:.2f} samples/s")
+print(f"Throughput: {throughput:.2f} Images/s")
 print(f"Average Power: {power_avg_w:.3f} W")
 print(f"Total Energy: {energy_joules:.3f} J")
-print(f"Efficiency: {efficiency:.3f} Samples/J" if efficiency else "Efficiency: N/A")
+print(f"Efficiency: {efficiency:.3f} Images/J" if efficiency else "Efficiency: N/A")
 print(f"Avg GPU Util: {util_avg:.3f} %")
 print("========================")
-
-# # Load best model weights
-# if best_model_wts:
-#     model.load_state_dict(best_model_wts)
-
-# # Evaluate on test set
-# logger.info('Evaluating on test set...')
-# model.eval()
-# all_preds = []
-# all_labels = []
-
-# if len(test_loader) > 0:
-#     for inputs, labels in test_loader:
-#         inputs = inputs.to(device)
-#         labels = labels.to(device).float().unsqueeze(1)
-#         outputs = model(inputs)
-#         preds = torch.sigmoid(outputs) > 0.5
-#         all_preds.append(preds.cpu().numpy())
-#         all_labels.append(labels.cpu().numpy())
-
-#     all_preds = np.concatenate(all_preds)
-#     all_labels = np.concatenate(all_labels)
-
-#     logger.info('Generating classification report...')
-#     print(classification_report(all_labels, all_preds, target_names=['0', '1']))
-# else:
-#     logger.warning("Test loader is empty, skipping evaluation.")
-
-# # Plot Accuracy and Loss
-# logger.info('Plotting accuracy and loss...')
-# plt.figure(figsize=(14, 5))
-# plt.subplot(1, 2, 1)
-# plt.plot(train_acc_history, label='Training accuracy')
-# plt.plot(val_acc_history, label='Validation accuracy')
-# plt.title('Training and validation accuracy')
-# plt.legend()
-
-# plt.subplot(1, 2, 2)
-# plt.plot(train_loss_history, label='Training loss')
-# plt.plot(val_loss_history, label='Validation loss')
-# plt.title('Training and validation loss')
-# plt.legend()
-
-# # Saving the figure with a new name to distinguish from original
-# output_path = '/home/data3/Ali/Code/Saina/Brea/OutPut/figure1_3_optimized.png'
-# # Ensure directory exists if possible, otherwise use local or keep original path structure assumption
-# if os.path.exists(os.path.dirname(output_path)):
-#     plt.savefig(output_path)
-#     logger.info(f"Saved figure to {output_path}")
-# else:
-#     # If the path doesn't exist (maybe different environment), try saving locally or warn
-#     # Stick to original logic but maybe handle exception
-#     try:
-#         plt.savefig(output_path)
-#     except Exception as e:
-#         logger.warning(f"Could not save figure to {output_path}: {e}")
-#         # Try local save
-#         plt.savefig('figure1_3_optimized.png')
-#         logger.info("Saved figure to local directory as figure1_3_optimized.png")

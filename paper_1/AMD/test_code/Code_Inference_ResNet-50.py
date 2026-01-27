@@ -19,6 +19,8 @@ import torch
 import time
 from statistics import mean
 
+
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -151,7 +153,7 @@ def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(
     stats = monitor.get_stats()
     power_avg_w = stats.get("gpu_0_power_avg_w", None)
     energy_joules = power_avg_w * total_time if power_avg_w else None
-    util_avg = stats.get("gpu_0_util_avg_pct", None)
+    util_avg = stats.get("gpu_0_util_avg_pct_gfx", None)
 
     # Calcular throughput
     total_samples = num_iters * batch_size
@@ -165,7 +167,7 @@ def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(
         eficiencia = None
         
 
-    print("\n=== Resultados Inferencia ResNet-50 NVIDIA===")
+    print("\n=== Resultados Inferencia ResNet-50 AMD===")
     print(f"Batch Size: {batch_size}")
     print(f"Pasadas totales (Iterations): {num_iters}")
     print(f"Total muestras: {total_samples}")

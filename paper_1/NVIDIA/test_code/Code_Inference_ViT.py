@@ -1,4 +1,3 @@
-# Medicion de metricas
 from obtain_data import GpuMonitor, export_model_info
 
 import csv
@@ -7,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split
-from torchvision import models, transforms
+from torchvision import transforms
 from torch.utils.data import DataLoader, Dataset
 import torch
 import torch.nn as nn
@@ -18,6 +17,8 @@ import logging
 import torch
 import time
 from statistics import mean
+from transformers import ViTForImageClassification, ViTFeatureExtractor
+
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -52,43 +53,61 @@ logger.info('Collecting image paths and labels...')
 image_paths = []
 labels = []
 
-for folder_name in os.listdir(dataset_dir):
-    class_dir_0 = os.path.join(dataset_dir, folder_name, '0')
-    class_dir_1 = os.path.join(dataset_dir, folder_name, '1')
-    for img_name in os.listdir(class_dir_0):
-        image_paths.append(os.path.join(class_dir_0, img_name))
-        labels.append(0)
-    for img_name in os.listdir(class_dir_1):
-        image_paths.append(os.path.join(class_dir_1, img_name))
-        labels.append(1)
-
-logger.info(f'Collected {len(image_paths)} images.')
+if os.path.exists(dataset_dir):
+    for folder_name in os.listdir(dataset_dir):
+        class_dir_0 = os.path.join(dataset_dir, folder_name, '0')
+        class_dir_1 = os.path.join(dataset_dir, folder_name, '1')
+        if os.path.exists(class_dir_0):
+            for img_name in os.listdir(class_dir_0):
+                image_paths.append(os.path.join(class_dir_0, img_name))
+                labels.append(0)
+        if os.path.exists(class_dir_1):
+            for img_name in os.listdir(class_dir_1):
+                image_paths.append(os.path.join(class_dir_1, img_name))
+                labels.append(1)
+    logger.info(f'Collected {len(image_paths)} images.')
+else:
+    logger.warning(f"Dataset directory not found: {dataset_dir}. Please ensure the path is correct.")
 
 # Split the data into training, validation, and testing sets
 logger.info('Splitting data into training, validation, and testing sets...')
-train_paths, temp_paths, train_labels, temp_labels = train_test_split(image_paths, labels, test_size=0.3, stratify=labels, random_state=42)
-val_paths, test_paths, val_labels, test_labels = train_test_split(temp_paths, temp_labels, test_size=0.3333, stratify=temp_labels, random_state=42)
+if len(image_paths) > 0:
+    train_paths, temp_paths, train_labels, temp_labels = train_test_split(image_paths, labels, test_size=0.3, stratify=labels, random_state=42)
+    val_paths, test_paths, val_labels, test_labels = train_test_split(temp_paths, temp_labels, test_size=0.3333, stratify=temp_labels, random_state=42)
+else:
+    train_paths, val_paths, test_paths = [], [], []
+    train_labels, val_labels, test_labels = [], [], []
 
 logger.info(f'Training set size: {len(train_paths)}')
 logger.info(f'Validation set size: {len(val_paths)}')
 logger.info(f'Test set size: {len(test_paths)}')
 
-# Data transforms without augmentation
+# Data transforms
+# Load feature extractor for ViT normalization constants
+try:
+    feature_extractor = ViTFeatureExtractor.from_pretrained('google/vit-base-patch16-224-in21k')
+    image_mean = feature_extractor.image_mean
+    image_std = feature_extractor.image_std
+except Exception as e:
+    logger.warning(f"Could not load ViTFeatureExtractor: {e}. Using default ImageNet stats.")
+    image_mean = [0.485, 0.456, 0.406]
+    image_std = [0.229, 0.224, 0.225]
+
 data_transforms = {
     'train': transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        transforms.Normalize(mean=image_mean, std=image_std)
     ]),
     'val': transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        transforms.Normalize(mean=image_mean, std=image_std)
     ]),
     'test': transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        transforms.Normalize(mean=image_mean, std=image_std)
     ]),
 }
 
@@ -104,24 +123,18 @@ train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
 test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
 
-# Load the pretrained ResNet-50 model
-logger.info('Loading pretrained ResNet-50 model...')
-model = models.resnet50(pretrained=True)
-
-# Modify the final layer for binary classification with dropout
-num_ftrs = model.fc.in_features
-model.fc = nn.Sequential(
-    nn.Dropout(0.5),
-    nn.Linear(num_ftrs, 1)
-)
+# Load the pretrained ViT model
+logger.info('Loading pretrained Vision Transformer model...')
+model = ViTForImageClassification.from_pretrained('google/vit-base-patch16-224-in21k', num_labels=1)
 
 # Move the model to GPU if available
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 model = model.to(device)
 
 # ------------------ EXPORTAR INFO DEL MODELO ---------------------
-export_model_info(model=model, output_dir='Data/model_info.csv')
-# -----------------------------------------------------------------------------
+# Note: ViT inputs might be tricky for generic flop counters, passing a dummy input shape
+export_model_info(model=model, output_dir='Data/model_info.csv', input_shape=(1, 3, 224, 224))
+# ----------------------------------------------------------------------
 
 def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(3, 224, 224)):
     model.eval()
@@ -141,7 +154,7 @@ def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(
 
     with torch.no_grad():
         for _ in tqdm(range(num_iters), desc="Ejecutando iteraciones"):
-            _ = model(dummy_input)
+            _ = model(dummy_input).logits
             torch.cuda.synchronize()  # asegurar que se complete cada 
 
     total_time = time.time() - start_time
@@ -165,7 +178,7 @@ def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(
         eficiencia = None
         
 
-    print("\n=== Resultados Inferencia ResNet-50 NVIDIA===")
+    print("\n=== Resultados ViT Inferencia NVIDIA ===")
     print(f"Batch Size: {batch_size}")
     print(f"Pasadas totales (Iterations): {num_iters}")
     print(f"Total muestras: {total_samples}")
