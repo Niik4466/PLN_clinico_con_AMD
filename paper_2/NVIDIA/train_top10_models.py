@@ -145,54 +145,11 @@ class BertClassifier(nn.Module):
 # FUNCIONES DE MEDICIÓN DE EFICIENCIA
 # ==============================================================================
 
-def contar_flops_texto(model, model_name, batch_size, seq_len, num_classes):
-    """Calcula FLOPs manualmente para modelos de texto."""
-    flops = 0
-    
-    if model_name in ['SimpleRNN', 'rnn']:
-        embedding_dim = model.embedding.embedding_dim
-        hidden_dim = model.rnn.hidden_size
-        rnn_flops = 2 * hidden_dim * (hidden_dim + embedding_dim) * seq_len * batch_size
-        fc_flops = 2 * hidden_dim * num_classes * batch_size
-        flops = rnn_flops + fc_flops
-        
-    elif model_name in ['LSTM', 'lstm']:
-        embedding_dim = model.embedding.embedding_dim
-        hidden_dim = model.lstm.hidden_size
-        lstm_flops = 4 * 2 * hidden_dim * (hidden_dim + embedding_dim) * seq_len * batch_size
-        fc_flops = 2 * hidden_dim * num_classes * batch_size
-        flops = lstm_flops + fc_flops
-        
-    elif model_name in ['BiLSTM', 'bilstm']:
-        embedding_dim = model.embedding.embedding_dim
-        hidden_dim = model.lstm.hidden_size
-        lstm_flops = 2 * (4 * 2 * hidden_dim * (hidden_dim + embedding_dim) * seq_len * batch_size)
-        fc_flops = 2 * (2 * hidden_dim) * num_classes * batch_size
-        flops = lstm_flops + fc_flops
-        
-    elif model_name in ['BERT', 'bert']:
-        try:
-            config = model.bert.config
-            num_layers = config.num_hidden_layers
-            hidden_size = config.hidden_size
-            intermediate_size = config.intermediate_size
-        except:
-            num_layers, hidden_size, intermediate_size = 12, 768, 3072
-        
-        attention_flops = (4 * seq_len * hidden_size * hidden_size + 
-                          2 * seq_len * seq_len * hidden_size)
-        ffn_flops = 2 * 2 * seq_len * hidden_size * intermediate_size
-        layer_flops = attention_flops + ffn_flops
-        bert_flops = num_layers * layer_flops * batch_size
-        fc_flops = 2 * hidden_size * num_classes * batch_size
-        flops = bert_flops + fc_flops
-    
-    return int(flops)
-
 
 def medir_eficiencia_texto(model, model_name, monitor, device, vocab_size, num_classes, 
-                           batch_size=16, seq_len=512, num_iters=100, is_bert=False):
-    """Mide eficiencia energética de modelos NLP."""
+                           batch_size=16, seq_len=512, num_iters=100, is_bert=False,
+                           output_path=None):
+    """Mide eficiencia energética de modelos NLP y guarda series de tiempo."""
     print(f"\n{'='*80}")
     print(f"MIDIENDO EFICIENCIA: {model_name}")
     print(f"{'='*80}")
@@ -222,29 +179,37 @@ def medir_eficiencia_texto(model, model_name, monitor, device, vocab_size, num_c
     total_time = time.time() - start_time
     monitor.stop()
     
+    # Guardar series de tiempo si se especifica output_path
+    if output_path:
+        timeseries_dir = os.path.join(output_path, "timeseries")
+        monitor.export_to_csv(filename_prefix=f"benchmark_{model_name}", output_path=timeseries_dir)
+    
     stats = monitor.get_stats()
     power_avg_w = stats.get("gpu_0_power_avg_w", None)
+    power_std_w = stats.get("gpu_0_power_std_w", 0)
+    power_min_w = stats.get("gpu_0_power_min_w", None)
+    power_max_w = stats.get("gpu_0_power_max_w", None)
     energy_joules = power_avg_w * total_time if power_avg_w else None
     
     # AMD usa gpu_0_util_avg_pct_gfx, NVIDIA usa gpu_0_util_avg_pct
     util_avg = stats.get("gpu_0_util_avg_pct", None)  # NVIDIA primero
+    util_std = stats.get("gpu_0_util_std_pct", 0)
+    util_min = stats.get("gpu_0_util_min_pct", None)
+    util_max = stats.get("gpu_0_util_max_pct", None)
     if util_avg is None:
         util_avg = stats.get("gpu_0_util_avg_pct_gfx", None)  # AMD fallback
+        util_std = stats.get("gpu_0_util_std_pct_gfx", 0)
+        util_min = stats.get("gpu_0_util_min_pct_gfx", None)
+        util_max = stats.get("gpu_0_util_max_pct_gfx", None)
     
     vram_avg_bytes = stats.get("gpu_0_vram_avg_bytes", None)
     mem_avg = vram_avg_bytes / (1024 * 1024) if vram_avg_bytes else None
     
-    try:
-        flops_por_forward = contar_flops_texto(model, model_name, batch_size, seq_len, num_classes)
-        total_flops = flops_por_forward * num_iters
-    except Exception as e:
-        print(f"Warning: No se pudo calcular FLOPs: {e}")
-        flops_por_forward, total_flops = None, None
-    
-    eficiencia = total_flops / energy_joules if (energy_joules and total_flops) else None
-    
     total_samples = num_iters * batch_size
     throughput = total_samples / total_time if total_time > 0 else 0
+    
+    # Eficiencia en samples por joule
+    eficiencia = total_samples / energy_joules if energy_joules else None
     
     print(f"\n=== Resultados {model_name} ===")
     print(f"Batch Size: {batch_size}")
@@ -254,15 +219,13 @@ def medir_eficiencia_texto(model, model_name, monitor, device, vocab_size, num_c
     print(f"Tiempo total: {total_time:.3f} s")
     print(f"Throughput: {throughput:.2f} samples/s")
     if power_avg_w:
-        print(f"Potencia promedio: {power_avg_w:.3f} W")
+        print(f"Potencia promedio: {power_avg_w:.3f} W (±{power_std_w:.3f})")
     if energy_joules:
         print(f"Energía total: {energy_joules:.3f} J")
-    if flops_por_forward:
-        print(f"FLOPs por forward: {flops_por_forward:,}")
     if eficiencia:
-        print(f"Eficiencia: {eficiencia:.3e} FLOPs/J")
+        print(f"Eficiencia: {eficiencia:.2f} samples/J")
     if util_avg:
-        print(f"Uso GPU promedio: {util_avg:.3f}%")
+        print(f"Uso GPU promedio: {util_avg:.3f}% (±{util_std:.3f})")
     if mem_avg:
         print(f"Memoria GPU promedio: {mem_avg:.1f} MB")
     
@@ -274,11 +237,15 @@ def medir_eficiencia_texto(model, model_name, monitor, device, vocab_size, num_c
         "total_time_s": total_time,
         "throughput_samples_s": throughput,
         "power_avg_w": power_avg_w,
+        "power_std_w": power_std_w,
+        "power_min_w": power_min_w,
+        "power_max_w": power_max_w,
         "energy_j": energy_joules,
-        "flops_forward": flops_por_forward,
-        "total_flops": total_flops,
-        "efficiency_flops_per_joule": eficiencia,
+        "efficiency_samples_per_joule": eficiencia,
         "gpu_util_avg_pct": util_avg,
+        "gpu_util_std_pct": util_std,
+        "gpu_util_min_pct": util_min,
+        "gpu_util_max_pct": util_max,
         "gpu_mem_avg_mb": mem_avg
     }
 
@@ -299,15 +266,9 @@ def guardar_resultados_eficiencia(resultados_list, output_path):
     print(f"\nResultados de eficiencia guardados en: {csv_path}")
 
 
-def export_model_info_texto(model, model_name, output_dir, batch_size, seq_len, num_classes):
+def export_model_info_texto(model, model_name, output_dir, batch_size, seq_len):
     """Exporta información del modelo a un CSV."""
     os.makedirs(output_dir, exist_ok=True)
-    
-    try:
-        flops = contar_flops_texto(model, model_name, batch_size, seq_len, num_classes)
-    except Exception as e:
-        print(f"Warning: No se pudo calcular FLOPs para {model_name}: {e}")
-        flops = None
     
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -318,11 +279,10 @@ def export_model_info_texto(model, model_name, output_dir, batch_size, seq_len, 
     with open(output_path, 'a', newline='') as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(['model_name', 'input_shape', 'flops', 'total_params', 'trainable_params', 'dtype'])
+            writer.writerow(['model_name', 'input_shape', 'total_params', 'trainable_params', 'dtype'])
         writer.writerow([
             model_name,
             f"({batch_size}, {seq_len})",
-            flops if flops is not None else 'error',
             total_params,
             trainable_params,
             str(next(model.parameters()).dtype)
@@ -616,9 +576,10 @@ def main():
                                          vocab_size=tokenizer.vocab_size,
                                          num_classes=NUM_CLASSES,
                                          batch_size=batch_size, seq_len=MAX_LENGTH,
-                                         num_iters=args.efficiency_iters, is_bert=False)
+                                         num_iters=args.efficiency_iters, is_bert=False,
+                                         output_path=args.output)
             efficiency_results.append(eff)
-            export_model_info_texto(model, 'SimpleRNN', args.output, batch_size, MAX_LENGTH, NUM_CLASSES)
+            export_model_info_texto(model, 'SimpleRNN', args.output, batch_size, MAX_LENGTH)
     
     if 'lstm' in models_to_train:
         model = AdjustedLSTMModel(
@@ -636,9 +597,10 @@ def main():
                                          vocab_size=tokenizer.vocab_size,
                                          num_classes=NUM_CLASSES,
                                          batch_size=batch_size, seq_len=MAX_LENGTH,
-                                         num_iters=args.efficiency_iters, is_bert=False)
+                                         num_iters=args.efficiency_iters, is_bert=False,
+                                         output_path=args.output)
             efficiency_results.append(eff)
-            export_model_info_texto(model, 'LSTM', args.output, batch_size, MAX_LENGTH, NUM_CLASSES)
+            export_model_info_texto(model, 'LSTM', args.output, batch_size, MAX_LENGTH)
     
     if 'bilstm' in models_to_train:
         model = AdjustedBiLSTMModel(
@@ -656,9 +618,10 @@ def main():
                                          vocab_size=tokenizer.vocab_size,
                                          num_classes=NUM_CLASSES,
                                          batch_size=batch_size, seq_len=MAX_LENGTH,
-                                         num_iters=args.efficiency_iters, is_bert=False)
+                                         num_iters=args.efficiency_iters, is_bert=False,
+                                         output_path=args.output)
             efficiency_results.append(eff)
-            export_model_info_texto(model, 'BiLSTM', args.output, batch_size, MAX_LENGTH, NUM_CLASSES)
+            export_model_info_texto(model, 'BiLSTM', args.output, batch_size, MAX_LENGTH)
     
     if 'bert' in models_to_train:
         model = BertClassifier(BERT_MODEL_NAME, num_classes=NUM_CLASSES).to(device)
@@ -669,9 +632,10 @@ def main():
                                          vocab_size=tokenizer.vocab_size,
                                          num_classes=NUM_CLASSES,
                                          batch_size=batch_size, seq_len=MAX_LENGTH,
-                                         num_iters=args.efficiency_iters, is_bert=True)
+                                         num_iters=args.efficiency_iters, is_bert=True,
+                                         output_path=args.output)
             efficiency_results.append(eff)
-            export_model_info_texto(model, 'BERT', args.output, batch_size, MAX_LENGTH, NUM_CLASSES)
+            export_model_info_texto(model, 'BERT', args.output, batch_size, MAX_LENGTH)
     
     if efficiency_results:
         guardar_resultados_eficiencia(efficiency_results, args.output)
@@ -691,10 +655,10 @@ def main():
         for eff in efficiency_results:
             throughput = eff.get('throughput_samples_s', 0)
             power = eff.get('power_avg_w', 'N/A')
-            efficiency = eff.get('efficiency_flops_per_joule', 'N/A')
+            efficiency = eff.get('efficiency_samples_per_joule', 'N/A')
             if efficiency and efficiency != 'N/A':
-                efficiency = f"{efficiency:.2e}"
-            print(f"{eff['model_name']:15s} | Throughput: {throughput:,.1f} samples/s | Power: {power} W | Eff: {efficiency} FLOPs/J")
+                efficiency = f"{efficiency:.2f}"
+            print(f"{eff['model_name']:15s} | Throughput: {throughput:,.1f} samples/s | Power: {power} W | Eff: {efficiency} samples/J")
         print(f"{'='*80}\n")
 
 
