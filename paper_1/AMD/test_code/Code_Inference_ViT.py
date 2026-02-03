@@ -17,7 +17,7 @@ import logging
 import torch
 import time
 from statistics import mean
-from transformers import ViTForImageClassification, ViTFeatureExtractor
+from transformers import ViTForImageClassification, ViTImageProcessor
 
 
 # Set up logging
@@ -85,11 +85,11 @@ logger.info(f'Test set size: {len(test_paths)}')
 # Data transforms
 # Load feature extractor for ViT normalization constants
 try:
-    feature_extractor = ViTFeatureExtractor.from_pretrained('google/vit-base-patch16-224-in21k')
+    feature_extractor = ViTImageProcessor.from_pretrained('google/vit-base-patch16-224-in21k')
     image_mean = feature_extractor.image_mean
     image_std = feature_extractor.image_std
 except Exception as e:
-    logger.warning(f"Could not load ViTFeatureExtractor: {e}. Using default ImageNet stats.")
+    logger.warning(f"Could not load ViTImageProcessor: {e}. Using default ImageNet stats.")
     image_mean = [0.485, 0.456, 0.406]
     image_std = [0.229, 0.224, 0.225]
 
@@ -199,6 +199,6 @@ def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(
         "efficiency_samples_per_joule": eficiencia
     }
 
-monitor = GpuMonitor(interval=0.05, min_w_usage=10)
+monitor = GpuMonitor(interval=0.05, min_w_usage=50)
 
 resultados = medir_eficiencia(model, monitor, num_iters=10000, batch_size=32)

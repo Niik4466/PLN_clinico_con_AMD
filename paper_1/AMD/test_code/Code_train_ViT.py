@@ -14,7 +14,7 @@ import logging
 import multiprocessing
 import time
 from obtain_data import GpuMonitor
-from transformers import ViTForImageClassification, ViTFeatureExtractor
+from transformers import ViTForImageClassification, ViTImageProcessor
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -82,11 +82,11 @@ else:
 # Data transforms
 # Load feature extractor for ViT normalization constants
 try:
-    feature_extractor = ViTFeatureExtractor.from_pretrained('google/vit-base-patch16-224-in21k')
+    feature_extractor = ViTImageProcessor.from_pretrained('google/vit-base-patch16-224-in21k')
     image_mean = feature_extractor.image_mean
     image_std = feature_extractor.image_std
 except Exception as e:
-    logger.warning(f"Could not load ViTFeatureExtractor: {e}. Using default ImageNet stats.")
+    logger.warning(f"Could not load ViTImageProcessor: {e}. Using default ImageNet stats.")
     image_mean = [0.485, 0.456, 0.406]
     image_std = [0.229, 0.224, 0.225]
 
@@ -151,7 +151,7 @@ train_acc_history, val_acc_history = [], []
 train_loss_history, val_loss_history = [], []
 
 # Initialize Monitor
-monitor = GpuMonitor(interval=0.1, min_w_usage=40) # Monitor interval in seconds
+monitor = GpuMonitor(interval=0.1, min_w_usage=50) # Monitor interval in seconds
 
 logger.info('Starting training...')
 monitor.clear()
