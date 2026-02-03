@@ -147,6 +147,8 @@ def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(
     total_time = time.time() - start_time
     monitor.stop()
 
+    monitor.export_to_csv(filename_prefix="Inference_ResNet50_NVIDIA_raw", output_path="Data")
+
     # obtener estadísticas de GPU
     stats = monitor.get_stats()
     power_avg_w = stats.get("gpu_0_power_avg_w", None)

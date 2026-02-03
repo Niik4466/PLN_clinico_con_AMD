@@ -160,6 +160,8 @@ def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(
     total_time = time.time() - start_time
     monitor.stop()
 
+    monitor.export_to_csv(filename_prefix="Inference_ViT_AMD_raw", output_path="Data")
+
     # obtener estadísticas de GPU
     stats = monitor.get_stats()
     power_avg_w = stats.get("gpu_0_power_avg_w", None)
@@ -169,7 +171,6 @@ def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(
     # Calcular throughput
     total_samples = num_iters * batch_size
     throughput = total_samples / total_time if total_time > 0 else 0
-
 
     # calcular eficiencia (Samples/Joule)
     if energy_joules and energy_joules > 0:
@@ -202,3 +203,4 @@ def medir_eficiencia(model, monitor, num_iters=100, batch_size=32, input_shape=(
 monitor = GpuMonitor(interval=0.05, min_w_usage=50)
 
 resultados = medir_eficiencia(model, monitor, num_iters=10000, batch_size=32)
+

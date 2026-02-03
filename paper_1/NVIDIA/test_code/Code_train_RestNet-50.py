@@ -239,6 +239,7 @@ total_time = total_training_time
 logger.info('Training complete')
 
 # --- Calculate and Print Statistics ---
+monitor.export_to_csv(filename_prefix="Train_ResNet50_NVIDIA_raw", output_path="Data")
 stats = monitor.get_stats()
 power_avg_w = stats.get("gpu_0_power_avg_w", None)
 energy_joules = power_avg_w * total_time if power_avg_w else None
