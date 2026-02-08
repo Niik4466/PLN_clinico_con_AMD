@@ -17,7 +17,7 @@ import logging
 import torch
 import time
 from statistics import mean
-from transformers import ViTForImageClassification, ViTFeatureExtractor
+from transformers import ViTForImageClassification, ViTImageProcessor
 
 
 # Set up logging
