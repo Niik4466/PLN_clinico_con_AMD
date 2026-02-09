@@ -2,7 +2,7 @@ import threading
 import time
 import csv
 import os
-from statistics import mean
+from statistics import mean, stdev
 from typing import List, Optional
 
 # --- Detección de librerías ---
@@ -215,7 +215,16 @@ class GpuMonitor:
                             self.util_mm[idx].append(float(0 if val_mm == "N/A" else val_mm))
 
                         elif self.backend == 'NVIDIA':
-                            mem = nvmlDeviceGetMemoryInfo(g).used
+                            # Usar memory_allocated para comparabilidad con AMD
+                            # nvmlDeviceGetMemoryInfo reporta el pool reservado, no el uso real
+                            if TORCH_AVAILABLE:
+                                try:
+                                    mem = torch.cuda.memory_allocated(idx)
+                                except:
+                                    mem = nvmlDeviceGetMemoryInfo(g).used
+                            else:
+                                mem = nvmlDeviceGetMemoryInfo(g).used
+                            
                             pwr_mw = nvmlDeviceGetPowerUsage(g)
                             pwr_w = pwr_mw / 1000.0
                             
@@ -248,17 +257,37 @@ class GpuMonitor:
             vram_clean = [x for x in self.vram_usage[i] if x > 0] if self.vram_usage[i] else []
             power_clean = [x for x in self.power[i] if x > 0] if self.power[i] else []
             
+            # VRAM stats
             stats[f"gpu_{i}_vram_avg_bytes"] = mean(vram_clean) if vram_clean else None
+            stats[f"gpu_{i}_vram_std_bytes"] = stdev(vram_clean) if len(vram_clean) > 1 else 0
+            stats[f"gpu_{i}_vram_min_bytes"] = min(vram_clean) if vram_clean else None
+            stats[f"gpu_{i}_vram_max_bytes"] = max(vram_clean) if vram_clean else None
+            
+            # Power stats
             stats[f"gpu_{i}_power_avg_w"] = mean(power_clean) if power_clean else None
+            stats[f"gpu_{i}_power_std_w"] = stdev(power_clean) if len(power_clean) > 1 else 0
+            stats[f"gpu_{i}_power_min_w"] = min(power_clean) if power_clean else None
+            stats[f"gpu_{i}_power_max_w"] = max(power_clean) if power_clean else None
+            
             stats[f"gpu_{i}_samples"] = len(self.vram_usage[i])
 
             if self.backend == 'AMD':
-                stats[f"gpu_{i}_util_avg_pct_gfx"] = mean(self.util_gfx[i]) if self.util_gfx[i] else None
+                # AMD utilization stats (gfx)
+                gfx_clean = [x for x in self.util_gfx[i] if x >= 0] if self.util_gfx[i] else []
+                stats[f"gpu_{i}_util_avg_pct_gfx"] = mean(gfx_clean) if gfx_clean else None
+                stats[f"gpu_{i}_util_std_pct_gfx"] = stdev(gfx_clean) if len(gfx_clean) > 1 else 0
+                stats[f"gpu_{i}_util_min_pct_gfx"] = min(gfx_clean) if gfx_clean else None
+                stats[f"gpu_{i}_util_max_pct_gfx"] = max(gfx_clean) if gfx_clean else None
+                
                 stats[f"gpu_{i}_util_avg_pct_umc"] = mean(self.util_umc[i]) if self.util_umc[i] else None
                 stats[f"gpu_{i}_util_avg_pct_mm"] = mean(self.util_mm[i]) if self.util_mm[i] else None
             elif self.backend == 'NVIDIA':
-                util_clean = [x for x in self.util_gpu[i] if x > 0] if self.util_gpu[i] else []
+                # NVIDIA utilization stats
+                util_clean = [x for x in self.util_gpu[i] if x >= 0] if self.util_gpu[i] else []
                 stats[f"gpu_{i}_util_avg_pct"] = mean(util_clean) if util_clean else None
+                stats[f"gpu_{i}_util_std_pct"] = stdev(util_clean) if len(util_clean) > 1 else 0
+                stats[f"gpu_{i}_util_min_pct"] = min(util_clean) if util_clean else None
+                stats[f"gpu_{i}_util_max_pct"] = max(util_clean) if util_clean else None
         
         return stats
 
